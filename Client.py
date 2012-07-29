@@ -1,10 +1,19 @@
-import socket, time, sys, thread, ip2country, errno
-import Telnet
-
+import socket, time, thread, ip2country, errno
 from collections import defaultdict
+
+from BaseHTTPServer import BaseHTTPRequestHandler
+from StringIO import StringIO
+import base64
+import struct
+# TODO: compatibility for python < 2.6?
+from hashlib import sha1
+
+import Telnet
 
 class Client:
 	'this object represents one connected client'
+	websocket = False
+	handshake = False
 
 	def __init__(self, root, connection, address, session_id):
 		'initial setup for the connected client'
@@ -79,7 +88,7 @@ class Client:
 		self.data = ''
 
 		# holds compatibility flags - will be set by Protocol as necessary
-		self.compat = defaultdict(False)
+		self.compat = defaultdict(lambda: False)
 		self.scriptPassword = None
 		
 		now = time.time()
@@ -166,6 +175,15 @@ class Client:
 		if self.telnet:
 			msg = Telnet.filter_out(msg)
 		if not msg: return
+
+		if self.websocket:
+			if self.handshake:
+				msg = self.NewFrame(msg)
+			else:
+				# haven't done a handshake yet, doesn't make sense to send a message
+				# let's queue it instead just in case they finish the handshake before they disconnect
+				self.Send(msg)
+				return
 		try:
 			self.conn.send(msg+self.nl)
 		except socket.error:
@@ -184,6 +202,9 @@ class Client:
 				message = self.sendbuffer.pop(0)
 			self.sendingmessage = message
 		senddata = self.sendingmessage# [:64] # smaller chunks interpolate better, maybe base this off of number of clients?
+
+		if self.websocket:
+			senddata = self.NewFrame(senddata)
 		try:
 			sent = self.conn.send(senddata)
 			self.sendingmessage = self.sendingmessage[sent:] # only removes the number of bytes sent
@@ -247,3 +268,115 @@ class Client:
 	
 	def isMod(self):
 		return self.isAdmin() or ('mod' in self.accesslevels) # maybe cache these
+
+class HTTPRequest(BaseHTTPRequestHandler):
+    def __init__(self, request_text):
+        self.rfile = StringIO(request_text)
+        self.raw_requestline = self.rfile.readline()
+        self.error_code = self.error_message = None
+        self.parse_request()
+
+    def send_error(self, code, message):
+        self.error_code = code
+        self.error_message = message
+
+websocket_upgrade_template = '''HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: %s
+
+'''
+
+class WebSocket(Client):
+	websocket = True
+
+	def NewFrame(self, msg):
+		first = int('10000001', 2)
+		frame = struct.pack('B', first)
+
+		length = len(msg)
+		if length < 126:
+			frame += struct.pack('B', length)
+		elif length < 65535:
+			frame += struct.pack('!H', length)
+		else:
+			frame += struct.pack('!Q', length)
+
+		frame += msg
+		return frame
+
+	def ParseFrame(self, frame):
+		byte = struct.Struct('B')
+		# first, = byte.unpack(frame[0])
+		second, = byte.unpack(frame[1])
+		mask = (second & 128 == 128)
+		second = second & 127
+
+		if second < 126:
+			length = second
+			mask_pos = 2
+		elif second == 126:
+			length, = struct.unpack('!H', frame[2:6])
+			mask_pos = 4
+		else:
+			length, = struct.unpack('!Q', frame[2:10])
+			mask_pos = 12
+
+		if mask:
+			masks = frame[mask_pos:mask_pos+4]
+			frame = frame[mask_pos+4:]
+			masks = [byte.unpack(b)[0] for b in masks]
+
+			msg = ''
+			for i in xrange(length):
+				msg += byte.pack(
+					byte.unpack(frame[i])[0] ^ masks[i % 4]
+				)
+		else:
+			msg = frame[mask_pos:]
+
+		return msg
+
+		# TODO: handle data after the end of the frame (put in a buffer for the next frame)
+
+	def HTTPError(self, req):
+		self.conn.send(' '.join((req.request_version, str(req.error_code), req.error_message)))
+		self.conn.send('\r\n\r\n')
+
+	def Handle(self, data):
+		if not self.handshake:
+			if '\r\n\r\n' in data:
+				frame, self.data = data.split('\r\n\r\n', 1)
+			elif '\n\n' in data:
+				frame, self.data = data.split('\n\n', 1)
+			else:
+				self.data = data
+				return
+
+			req = HTTPRequest(frame)
+			if req.error_code:
+				self.HTTPError(req)
+			elif req.command == 'GET' and req.path == '/websocket':
+				if ('Sec-WebSocket-Key' in req.headers and
+					'Upgrade' in req.headers and
+					req.headers['Upgrade'] == 'websocket'
+				):
+					if 'Sec-WebSocket-Key' in req.headers:
+						key = req.headers['Sec-WebSocket-Key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+						accept = base64.b64encode(sha1(key).digest())
+						response = websocket_upgrade_template % accept
+
+						if not '\r\n' in response:
+							response = response.replace('\r', '\n').replace('\n', '\r\n')
+						self.conn.send(response)
+						self.handshake = True
+						return
+
+			req.error_code = 500
+			req.error_message = 'Unable to open websocket'
+			self.HTTPError(req)
+			self.Remove()
+		else:
+			# parse websocket frame
+			frame = self.ParseFrame(data)
+			Client.Handle(self, frame)

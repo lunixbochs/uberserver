@@ -5,9 +5,10 @@ import thread, traceback, signal, socket, sys
 from urllib import urlopen
 
 from DataHandler import DataHandler
-from Client import Client
 from NATServer import NATServer
 from Dispatcher import Dispatcher
+
+import Client
 
 import ip2country # just to make sure it's downloaded
 import ChanServ
@@ -27,19 +28,25 @@ try:
 except AttributeError:
 	pass
 
+def new_server(host, port, backlog=100):
+	s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,
+					s.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) | 1)
+					# fixes TIME_WAIT :D
+	s.bind((host, port))
+	s.listen(backlog)
+	return s
+
 _root.console_write('-'*40)
 _root.console_write('Starting uberserver...\n')
 
 host = ''
 port = _root.port
 natport = _root.natport
-backlog = 100
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt( socket.SOL_SOCKET, socket.SO_REUSEADDR,
-				server.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) | 1 )
-				# fixes TIME_WAIT :D
-server.bind((host,port))
-server.listen(backlog)
+webport = _root.webport
+
+server = new_server(host, port)
+websocket = new_server(host, webport)
 
 try:
 	natserver = NATServer(natport)
@@ -69,10 +76,15 @@ _root.console_write()
 _root.local_ip = local_addr
 _root.online_ip = web_addr
 
-_root.console_write('Listening for clients on port %i'%port)
-_root.console_write('Using %i client handling thread(s).'%_root.max_threads)
+_root.console_write('Listening for WebSocket connections on port %i' % webport)
+_root.console_write('Listening for clients on port %i' % port)
+_root.console_write('Using %i client handling thread(s).' % _root.max_threads)
 
-dispatcher = Dispatcher(_root, server)
+servers = {
+	server: (lambda root, conn, addr, sid: Client.Client(root, conn, addr, sid)),
+	websocket: (lambda root, conn, addr, sid: Client.WebSocket(root, conn, addr, sid))
+}
+dispatcher = Dispatcher(_root, servers)
 _root.dispatcher = dispatcher
 
 chanserv = True

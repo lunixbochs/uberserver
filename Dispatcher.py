@@ -1,10 +1,10 @@
-import Multiplexer, Protocol, Client
+import Multiplexer, Protocol
 import socket, thread, traceback
 
 class Dispatcher:
-	def __init__(self, root, server):
+	def __init__(self, root, servers):
 		self._root = root
-		self.server = server
+		self.servers = servers
 		self.poller = Multiplexer.BestMultiplexer()
 		self.socketmap = {}
 		self.workers = []
@@ -14,30 +14,33 @@ class Dispatcher:
 		self.num = 0
 	
 	def pump(self):
-		self.poller.register(self.server)
+		for s in self.servers.keys():
+			self.poller.register(s)
+
 		self.poller.pump(self.callback)
 	
 	def callback(self, inputs, outputs, errors):
 		try:
 			for s in inputs:
-				if s == self.server:
+				if s in self.servers:
+					new_client = self.servers[s]
 					try:
-						conn, addr = self.server.accept()
+						conn, addr = s.accept()
 					except socket.error, e:
 						if e[0] == 24: # ulimit maxfiles, need to raise ulimit
 							self._root.console_write('Maximum files reached, refused new connection.')
 						else:
 							raise socket.error, e
-					client = Client.Client(self._root, conn, addr, self._root.session_id)
+					client = new_client(self._root, conn, addr, self._root.session_id)
 					self.addClient(client)
 				else:
 					try:
 						data = s.recv(1024)
 						if data:
 							if s in self.socketmap: # for threading, just need to pass this to a worker thread... remember to fix the problem for any calls to handler, and fix msg ids (handler.thread)
-									self.socketmap[s].Handle(data)
+								self.socketmap[s].Handle(data)
 							else:
-								print 'Problem, sockets are not being cleaned up properly.'
+								self._root.console_write('Problem: sockets are not being cleaned up properly.')
 						else:
 							raise socket.error, 'Connection closed.'
 					except socket.error:

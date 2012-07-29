@@ -20,6 +20,7 @@ class DataHandler:
 		self.console_buffer = []
 		self.port = 8200
 		self.natport = self.port+1
+		self.webport = self.port+2
 		self.dbtype = 'lan'
 		self.lanadmin = {'username':'', 'password':''}
 		self.latestspringversion = '*'
@@ -100,6 +101,8 @@ class DataHandler:
 				print '      { Server will host on this port (default is 8200) }'
 				print '  -n, --natport number'
 				print '      { Server will use this port for NAT transversal (default is 8201) }'
+				print '  -w, --webport number'
+				print '      { Server will use this port for WebSocket clients (default is 8202) }'
 				print '  -l, --lan'
 				print '      { Users do not need to be registered to login - breaks rudimentary features like channel ops/founders, channel/battle bans, etc. }'
 				print '  -a, --lanadmin username password [hash] }'
@@ -158,6 +161,9 @@ class DataHandler:
 			elif arg in ['n', 'natport']:
 				try: self.natport = int(argp[0])
 				except: print 'Invalid NAT port specification'
+			elif arg in ['w', 'webport']:
+				try: self.natport = int(argp[0])
+				except: print 'Invalid WebSocket port specification'
 			elif arg in ['l', 'lan']:
 				self.dbtype = 'lan'
 			elif arg in ['a', 'lanadmin']:
@@ -440,7 +446,7 @@ class DataHandler:
 			except KeyError: pass # the user was removed
 
 	def console_write(self, lines=''):
-		if type(lines) in(str, unicode):
+		if type(lines) in (str, unicode):
 			lines = lines.split('\n')
 		elif not type(lines) in (list, tuple, set):
 			try: lines = [lines.__repr__()]
